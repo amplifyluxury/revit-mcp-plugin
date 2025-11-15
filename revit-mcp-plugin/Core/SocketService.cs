@@ -20,6 +20,7 @@ namespace revit_mcp_plugin.Core
         private TcpListener _listener;
         private Thread _listenerThread;
         private bool _isRunning;
+        private bool _isInitialized;
         private int _port = 8080;
         private UIApplication _uiApp;
         private ICommandRegistry _commandRegistry;
@@ -43,6 +44,7 @@ namespace revit_mcp_plugin.Core
         }
 
         public bool IsRunning => _isRunning;
+        public bool IsInitialized => _isInitialized;
 
         public int Port
         {
@@ -54,6 +56,12 @@ namespace revit_mcp_plugin.Core
         // Initialization.
         public void Initialize(UIApplication uiApp)
         {
+            // Skip if already initialized
+            if (_isInitialized)
+            {
+                return;
+            }
+
             _uiApp = uiApp;
 
             // 初始化事件管理器
@@ -92,6 +100,7 @@ namespace revit_mcp_plugin.Core
                 _commandRegistry, _logger, configManager, _uiApp);
             commandManager.LoadCommands();
 
+            _isInitialized = true;
             _logger.Info($"Socket service initialized on port {_port}");
         }
 
@@ -137,6 +146,35 @@ namespace revit_mcp_plugin.Core
             {
                 // log error
             }
+        }
+
+        /// <summary>
+        /// Execute a command directly from UI (without going through the socket)
+        /// </summary>
+        /// <param name="request">The JSON-RPC request</param>
+        /// <returns>JSON-RPC response string</returns>
+        public string ExecuteCommandDirect(JsonRPCRequest request)
+        {
+            if (_commandExecutor == null)
+            {
+                return CreateErrorResponse("error", -32603, "Command executor not initialized");
+            }
+
+            return _commandExecutor.ExecuteCommand(request);
+        }
+
+        private string CreateErrorResponse(string id, int code, string message)
+        {
+            var response = new JsonRPCErrorResponse
+            {
+                Id = id,
+                Error = new JsonRPCError
+                {
+                    Code = code,
+                    Message = message
+                }
+            };
+            return response.ToJson();
         }
 
         private void ListenForClients()
