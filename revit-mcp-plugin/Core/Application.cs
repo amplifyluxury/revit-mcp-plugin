@@ -43,6 +43,14 @@ namespace revit_mcp_plugin.Core
             showElementsButtonData.LargeImage = new BitmapImage(new Uri("/revit-mcp-plugin;component/Core/Ressources/icon-32.png", UriKind.RelativeOrAbsolute));
             mcpPanel.AddItem(showElementsButtonData);
 
+            // Add button to export entire project
+            PushButtonData exportProjectButtonData = new PushButtonData("ID_EXCMD_EXPORT_PROJECT", "Export\r\nProject",
+                Assembly.GetExecutingAssembly().Location, "revit_mcp_plugin.Commands.ExportProjectCommand");
+            exportProjectButtonData.ToolTip = "Export entire project to JSON file";
+            exportProjectButtonData.Image = new BitmapImage(new Uri("/revit-mcp-plugin;component/Core/Ressources/settings-16.png", UriKind.RelativeOrAbsolute));
+            exportProjectButtonData.LargeImage = new BitmapImage(new Uri("/revit-mcp-plugin;component/Core/Ressources/settings-32.png", UriKind.RelativeOrAbsolute));
+            mcpPanel.AddItem(exportProjectButtonData);
+
             return Result.Succeeded;
         }
 

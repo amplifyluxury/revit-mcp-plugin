@@ -2,15 +2,16 @@ using Autodesk.Revit.Attributes;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
 using Newtonsoft.Json;
-using revit_mcp_plugin.UI;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Windows.Forms;
 
 namespace revit_mcp_plugin.Commands
 {
     [Transaction(TransactionMode.Manual)]
-    public class ShowCurrentViewElementsCommand : IExternalCommand
+    public class ExportProjectCommand : IExternalCommand
     {
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
@@ -19,13 +20,28 @@ namespace revit_mcp_plugin.Commands
                 UIApplication uiApp = commandData.Application;
                 UIDocument uiDoc = uiApp.ActiveUIDocument;
                 Document doc = uiDoc.Document;
-                View activeView = doc.ActiveView;
 
-                // Get elements in the current view
-                var collector = new FilteredElementCollector(doc, activeView.Id)
+                // Show save file dialog
+                System.Windows.Forms.SaveFileDialog saveFileDialog = new System.Windows.Forms.SaveFileDialog
+                {
+                    Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*",
+                    FilterIndex = 1,
+                    RestoreDirectory = true,
+                    FileName = $"{doc.Title}_Export_{DateTime.Now:yyyyMMdd_HHmmss}.json",
+                    Title = "Export Project to JSON"
+                };
+
+                if (saveFileDialog.ShowDialog() != System.Windows.Forms.DialogResult.OK)
+                {
+                    return Result.Cancelled;
+                }
+
+                string filePath = saveFileDialog.FileName;
+
+                // Collect all elements from the project
+                var collector = new FilteredElementCollector(doc)
                     .WhereElementIsNotElementType();
 
-                // Filter to common categories
                 var categories = new List<BuiltInCategory>
                 {
                     BuiltInCategory.OST_Walls,
@@ -38,55 +54,140 @@ namespace revit_mcp_plugin.Commands
                     BuiltInCategory.OST_Stairs,
                     BuiltInCategory.OST_StructuralFraming,
                     BuiltInCategory.OST_Ceilings,
-                    BuiltInCategory.OST_Rooms
+                    BuiltInCategory.OST_Rooms,
+                    BuiltInCategory.OST_MEPSpaces,
+                    BuiltInCategory.OST_Railings,
+                    BuiltInCategory.OST_StructuralColumns,
+                    BuiltInCategory.OST_StructuralFoundation,
+                    BuiltInCategory.OST_CurtainWallPanels,
+                    BuiltInCategory.OST_CurtainWallMullions,
+                    BuiltInCategory.OST_Ramps,
+                    BuiltInCategory.OST_GenericModel,
+                    BuiltInCategory.OST_MechanicalEquipment,
+                    BuiltInCategory.OST_ElectricalEquipment,
+                    BuiltInCategory.OST_PlumbingFixtures,
+                    BuiltInCategory.OST_LightingFixtures,
+                    BuiltInCategory.OST_DuctCurves,
+                    BuiltInCategory.OST_PipeCurves,
+                    BuiltInCategory.OST_CableTray,
+                    BuiltInCategory.OST_Conduit
                 };
 
                 ElementMulticategoryFilter categoryFilter = new ElementMulticategoryFilter(categories);
                 var filteredElements = collector.WherePasses(categoryFilter).ToElements();
 
-                // Filter out hidden elements
-                var visibleElements = filteredElements.Where(e => !e.IsHidden(activeView)).ToList();
+                // Group elements by level
+                var elementsByLevel = filteredElements
+                    .GroupBy(e => doc.GetElement(e.LevelId)?.Name ?? "No Level")
+                    .OrderBy(g => g.Key)
+                    .ToDictionary(
+                        g => g.Key,
+                        g => g.GroupBy(e => e.Category?.Name ?? "Unknown")
+                               .OrderBy(cg => cg.Key)
+                               .ToDictionary(
+                                   cg => cg.Key,
+                                   cg => cg.Select(elem => CreateElementData(elem, doc)).ToList()
+                               )
+                    );
 
-                // Build result object with comprehensive element data
-                var result = new
-                {
-                    ViewName = activeView.Name,
-                    ViewId = activeView.Id.ToString(),
-                    TotalElementsInView = new FilteredElementCollector(doc, activeView.Id).WhereElementIsNotElementType().GetElementCount(),
-                    FilteredElementCount = visibleElements.Count,
-                    Elements = visibleElements.Select(e => new
+                // Get all levels
+                var levels = new FilteredElementCollector(doc)
+                    .OfClass(typeof(Level))
+                    .Cast<Level>()
+                    .OrderBy(l => l.Elevation)
+                    .Select(l => new
                     {
-                        Id = e.Id.ToString(),
-                        UniqueId = e.UniqueId,
-                        Name = e.Name,
-                        Category = e.Category?.Name ?? "Unknown",
-                        Level = doc.GetElement(e.LevelId)?.Name ?? "N/A",
-                        TypeName = doc.GetElement(e.GetTypeId())?.Name ?? "N/A",
-                        Location = GetLocationInfo(e),
-                        Geometry = GetGeometryInfo(e),
-                        Properties = GetElementProperties(e, doc)
-                    }).ToList()
-                };
+                        Name = l.Name,
+                        Id = l.Id.ToString(),
+                        Elevation = l.Elevation
+                    })
+                    .ToList();
 
-                // Convert to JSON
-                string jsonResult = JsonConvert.SerializeObject(result, Formatting.Indented);
+                // Get all views
+                var views = new FilteredElementCollector(doc)
+                    .OfClass(typeof(Autodesk.Revit.DB.View))
+                    .Cast<Autodesk.Revit.DB.View>()
+                    .Where(v => !v.IsTemplate)
+                    .Select(v => new
+                    {
+                        Name = v.Name,
+                        Id = v.Id.ToString(),
+                        ViewType = v.ViewType.ToString(),
+                        Scale = v.Scale
+                    })
+                    .ToList();
 
-                // Show results in a window
-                var resultsWindow = new ResultsWindow
+                // Build comprehensive project structure
+                var projectData = new
                 {
-                    Title = $"Current View Elements - {activeView.Name}",
-                    ResultText = jsonResult
+                    ProjectInfo = new
+                    {
+                        Title = doc.Title,
+                        PathName = doc.PathName,
+                        IsWorkshared = doc.IsWorkshared,
+                        IsFamilyDocument = doc.IsFamilyDocument,
+                        ExportDate = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+                        RevitVersion = uiApp.Application.VersionNumber,
+                        RevitBuild = uiApp.Application.VersionBuild
+                    },
+                    Statistics = new
+                    {
+                        TotalElements = filteredElements.Count,
+                        ElementsByCategory = filteredElements
+                            .GroupBy(e => e.Category?.Name ?? "Unknown")
+                            .OrderBy(g => g.Key)
+                            .ToDictionary(g => g.Key, g => g.Count()),
+                        TotalLevels = levels.Count,
+                        TotalViews = views.Count
+                    },
+                    Levels = levels,
+                    Views = views,
+                    Elements = elementsByLevel
                 };
-                resultsWindow.ShowDialog();
+
+                // Serialize to JSON with indentation for readability
+                string json = JsonConvert.SerializeObject(projectData, Formatting.Indented, new JsonSerializerSettings
+                {
+                    NullValueHandling = NullValueHandling.Ignore,
+                    ReferenceLoopHandling = ReferenceLoopHandling.Ignore
+                });
+
+                // Write to file
+                File.WriteAllText(filePath, json);
+
+                // Show success message
+                Autodesk.Revit.UI.TaskDialog.Show(
+                    "Export Complete",
+                    $"Project exported successfully!\n\n" +
+                    $"File: {filePath}\n" +
+                    $"Elements exported: {filteredElements.Count}\n" +
+                    $"File size: {new FileInfo(filePath).Length / 1024:N0} KB"
+                );
 
                 return Result.Succeeded;
             }
             catch (Exception ex)
             {
                 message = ex.Message;
-                TaskDialog.Show("Error", $"An error occurred:\n\n{ex.Message}\n\nStack Trace:\n{ex.StackTrace}");
+                Autodesk.Revit.UI.TaskDialog.Show("Export Error", $"An error occurred:\n\n{ex.Message}\n\nStack Trace:\n{ex.StackTrace}");
                 return Result.Failed;
             }
+        }
+
+        private object CreateElementData(Element element, Document doc)
+        {
+            return new
+            {
+                Id = element.Id.ToString(),
+                UniqueId = element.UniqueId,
+                Name = element.Name,
+                Category = element.Category?.Name ?? "Unknown",
+                Level = doc.GetElement(element.LevelId)?.Name ?? "N/A",
+                TypeName = doc.GetElement(element.GetTypeId())?.Name ?? "N/A",
+                Location = GetLocationInfo(element),
+                Geometry = GetGeometryInfo(element),
+                Properties = GetElementProperties(element, doc)
+            };
         }
 
         private object GetLocationInfo(Element element)
@@ -169,19 +270,18 @@ namespace revit_mcp_plugin.Commands
         {
             var properties = new Dictionary<string, string>();
 
-            // Get ALL parameters from the element
-            var paramNames = new[] 
-            { 
+            var paramNames = new[]
+            {
                 "Comments", "Mark", "Family", "Type",
                 "Height", "Width", "Length", "Thickness",
-                "Area", "Volume", 
+                "Area", "Volume",
                 "Head Height", "Sill Height",
                 "Top Offset", "Base Offset", "Top Constraint", "Base Constraint",
                 "Unconnected Height",
                 "Fire Rating", "Function",
                 "Structural Material", "Structural Usage"
             };
-            
+
             foreach (var paramName in paramNames)
             {
                 Parameter param = element.LookupParameter(paramName);
@@ -198,7 +298,6 @@ namespace revit_mcp_plugin.Commands
                         else if (param.StorageType == StorageType.Double)
                         {
                             var val = param.AsDouble();
-                            // Check if it's an area or volume parameter
                             if (paramName.Contains("Area"))
                                 properties[paramName] = $"{val:F2} sq ft";
                             else if (paramName.Contains("Volume"))
